@@ -10,7 +10,6 @@ export default async function handler(req, res) {
     return res.status(500).send("BOT_TOKEN missing");
   }
 
-  // APIs
   const API_FB = "https://ball-livid.vercel.app/api/fbd?id=";
   const API_YT = "https://ball-livid.vercel.app/api/ytd?url=";
   const API_TT = "https://ball-livid.vercel.app/api/tiktokd?id=";
@@ -40,17 +39,17 @@ export default async function handler(req, res) {
 
 ✔️ Facebook → video
 ✔️ TikTok → video (no watermark)
-✔️ YouTube → download link (360p)
+✔️ YouTube → video (360p)
 
 Send video link`
     });
     return res.end();
   }
 
+  // ===== Detect platform =====
   let platform = "";
   let apiUrl = "";
 
-  // Platform detect (SAFE)
   if (text.includes("facebook.com") || text.includes("fb.watch")) {
     platform = "fb";
     apiUrl = API_FB + encodeURIComponent(text);
@@ -66,9 +65,25 @@ Send video link`
   else {
     await tg("sendMessage", {
       chat_id: chatId,
-      text: "❌ Invalid link\nSend FB / YT / TikTok link only"
+      text: "❌ Invalid link"
     });
     return res.end();
+  }
+
+  // ===== Download animation =====
+  const prog = await tg("sendMessage", {
+    chat_id: chatId,
+    text: "⬇️ Downloading... 0%"
+  }).then(r => r.json());
+
+  const steps = ["20%", "40%", "60%", "80%", "100%"];
+  for (const p of steps) {
+    await new Promise(r => setTimeout(r, 500));
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: prog.result.message_id,
+      text: `⬇️ Downloading... ${p}`
+    });
   }
 
   try {
@@ -101,17 +116,31 @@ Send video link`
       return res.end();
     }
 
-    // ================= YOUTUBE (LINK ONLY) =================
+    // ================= YOUTUBE (VIDEO SEND) =================
     if (platform === "yt") {
       const items = data?.data?.data?.items || [];
-      const v = items.find(x => x.ext === "mp4" && x.height === 360);
+
+      // safest mp4 360p
+      const v = items.find(
+        x => x.ext === "mp4" && x.height === 360
+      );
 
       if (!v?.url) throw "YT error";
 
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: `🎬 YouTube 360p Download Link:\n\n${v.url}`
-      });
+      try {
+        // try send as video
+        await tg("sendVideo", {
+          chat_id: chatId,
+          video: v.url,
+          caption: "✅ YouTube 360p Video\n👑 Kingboss"
+        });
+      } catch {
+        // fallback (Telegram limit issue)
+        await tg("sendMessage", {
+          chat_id: chatId,
+          text: `🎬 YouTube Video Link:\n\n${v.url}`
+        });
+      }
       return res.end();
     }
 
