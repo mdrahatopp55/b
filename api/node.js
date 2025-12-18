@@ -10,6 +10,7 @@ export default async function handler(req, res) {
     return res.status(500).send("BOT_TOKEN missing");
   }
 
+  // APIs
   const API_FB = "https://ball-livid.vercel.app/api/fbd?id=";
   const API_YT = "https://ball-livid.vercel.app/api/ytd?url=";
   const API_TT = "https://ball-livid.vercel.app/api/tiktokd?id=";
@@ -17,48 +18,55 @@ export default async function handler(req, res) {
   const update = req.body;
   const msg = update.message;
   const chatId = msg?.chat?.id;
-  const text = msg?.text || "";
+  const text = msg?.text?.trim() || "";
 
   if (!chatId) return res.end();
 
   // Telegram helper
-  const tg = async (method, data) => {
-    return fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+  const tg = (method, data) =>
+    fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data)
     });
-  };
 
   // /start
   if (text === "/start") {
     await tg("sendMessage", {
       chat_id: chatId,
-      text: "🤖 Video Downloader Bot\n👑 Kingboss\n\nSend FB / YT / TikTok link"
+      text:
+`🤖 Video Downloader Bot
+👑 Kingboss
+
+✔️ Facebook → video
+✔️ TikTok → video (no watermark)
+✔️ YouTube → download link (360p)
+
+Send video link`
     });
     return res.end();
   }
 
-  let apiUrl = "";
   let platform = "";
+  let apiUrl = "";
 
-  // ✅ CORRECT DETECTION
+  // Platform detect (SAFE)
   if (text.includes("facebook.com") || text.includes("fb.watch")) {
-    apiUrl = API_FB + encodeURIComponent(text);
     platform = "fb";
+    apiUrl = API_FB + encodeURIComponent(text);
   }
   else if (text.includes("youtube.com") || text.includes("youtu.be")) {
-    apiUrl = API_YT + encodeURIComponent(text);
     platform = "yt";
+    apiUrl = API_YT + encodeURIComponent(text);
   }
   else if (text.includes("tiktok.com")) {
-    apiUrl = API_TT + encodeURIComponent(text);
     platform = "tt";
+    apiUrl = API_TT + encodeURIComponent(text);
   }
   else {
     await tg("sendMessage", {
       chat_id: chatId,
-      text: "❌ Invalid video link"
+      text: "❌ Invalid link\nSend FB / YT / TikTok link only"
     });
     return res.end();
   }
@@ -67,45 +75,50 @@ export default async function handler(req, res) {
     const r = await fetch(apiUrl);
     const data = await r.json();
 
-    let videoUrl = null;
-
-    // ✅ FACEBOOK
+    // ================= FACEBOOK =================
     if (platform === "fb") {
-      videoUrl = data?.download_links?.[0];
-    }
+      const video = data?.download_links?.[0];
+      if (!video) throw "FB error";
 
-    // ✅ YOUTUBE (360p mp4 with audio)
-    if (platform === "yt") {
-      const items = data?.data?.data?.items || [];
-      const v = items.find(
-        x => x.ext === "mp4" && x.height === 360
-      );
-      videoUrl = v?.url;
-    }
-
-    // ✅ TIKTOK (no watermark)
-    if (platform === "tt") {
-      videoUrl = data?.download_url;
-    }
-
-    if (!videoUrl) {
-      await tg("sendMessage", {
+      await tg("sendVideo", {
         chat_id: chatId,
-        text: "⚠️ Video not found"
+        video,
+        caption: "✅ Facebook Video\n👑 Kingboss"
       });
       return res.end();
     }
 
-    // ✅ FINAL SEND VIDEO
-    await tg("sendVideo", {
-      chat_id: chatId,
-      video: videoUrl
-    });
+    // ================= TIKTOK =================
+    if (platform === "tt") {
+      const video = data?.download_url;
+      if (!video) throw "TT error";
+
+      await tg("sendVideo", {
+        chat_id: chatId,
+        video,
+        caption: "✅ TikTok No Watermark\n👑 Kingboss"
+      });
+      return res.end();
+    }
+
+    // ================= YOUTUBE (LINK ONLY) =================
+    if (platform === "yt") {
+      const items = data?.data?.data?.items || [];
+      const v = items.find(x => x.ext === "mp4" && x.height === 360);
+
+      if (!v?.url) throw "YT error";
+
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: `🎬 YouTube 360p Download Link:\n\n${v.url}`
+      });
+      return res.end();
+    }
 
   } catch (e) {
     await tg("sendMessage", {
       chat_id: chatId,
-      text: "❌ Error downloading video"
+      text: "⚠️ Download failed. Try another link."
     });
   }
 
