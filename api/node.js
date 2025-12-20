@@ -38,8 +38,11 @@ export default async function handler(req, res) {
 👑 Kingboss
 
 ✔️ Facebook → video
-✔️ TikTok → video (no watermark)
-✔️ YouTube → video (360p)
+✔️ TikTok → no watermark
+✔️ YouTube → 360p
+
+📌 ≤20MB → Video sent
+📌 >20MB → Download link
 
 Send video link`
     });
@@ -76,7 +79,7 @@ Send video link`
     text: "⬇️ Downloading... 0%"
   }).then(r => r.json());
 
-  const steps = ["20%", "40%", "60%", "80%", "100%"];
+  const steps = ["25%", "50%", "75%", "100%"];
   for (const p of steps) {
     await new Promise(r => setTimeout(r, 500));
     await tg("editMessageText", {
@@ -90,57 +93,61 @@ Send video link`
     const r = await fetch(apiUrl);
     const data = await r.json();
 
+    // helper: send video or link
+    const sendSmart = async (url, caption, sizeBytes) => {
+      const MAX = 20 * 1024 * 1024; // 20MB
+
+      if (sizeBytes && sizeBytes <= MAX) {
+        await tg("sendVideo", {
+          chat_id: chatId,
+          video: url,
+          caption
+        });
+      } else {
+        await tg("sendMessage", {
+          chat_id: chatId,
+          text: `${caption}\n\n🔗 Download link:\n${url}`
+        });
+      }
+    };
+
     // ================= FACEBOOK =================
     if (platform === "fb") {
-      const video = data?.download_links?.[0];
-      if (!video) throw "FB error";
+      const v = data?.download_links?.[0];
+      if (!v?.url) throw "FB error";
 
-      await tg("sendVideo", {
-        chat_id: chatId,
-        video,
-        caption: "✅ Facebook Video\n👑 Kingboss"
-      });
+      await sendSmart(
+        v.url,
+        "✅ Facebook Video\n👑 Kingboss",
+        v.filesize || v.size
+      );
       return res.end();
     }
 
     // ================= TIKTOK =================
     if (platform === "tt") {
-      const video = data?.download_url;
-      if (!video) throw "TT error";
+      const url = data?.download_url;
+      if (!url) throw "TT error";
 
-      await tg("sendVideo", {
-        chat_id: chatId,
-        video,
-        caption: "✅ TikTok No Watermark\n👑 Kingboss"
-      });
+      await sendSmart(
+        url,
+        "✅ TikTok No Watermark\n👑 Kingboss",
+        data?.size
+      );
       return res.end();
     }
 
-    // ================= YOUTUBE (VIDEO SEND) =================
+    // ================= YOUTUBE =================
     if (platform === "yt") {
       const items = data?.data?.data?.items || [];
-
-      // safest mp4 360p
-      const v = items.find(
-        x => x.ext === "mp4" && x.height === 360
-      );
-
+      const v = items.find(x => x.ext === "mp4" && x.height === 360);
       if (!v?.url) throw "YT error";
 
-      try {
-        // try send as video
-        await tg("sendVideo", {
-          chat_id: chatId,
-          video: v.url,
-          caption: "✅ YouTube 360p Video\n👑 Kingboss"
-        });
-      } catch {
-        // fallback (Telegram limit issue)
-        await tg("sendMessage", {
-          chat_id: chatId,
-          text: `🎬 YouTube Video Link:\n\n${v.url}`
-        });
-      }
+      await sendSmart(
+        v.url,
+        "✅ YouTube 360p\n👑 Kingboss",
+        v.filesize || v.size
+      );
       return res.end();
     }
 
