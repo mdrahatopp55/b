@@ -1,212 +1,408 @@
-// ================= MEMORY DB =================
-let DB = {
-  enabled: true,
-  deletes: 0,
-  mutes: 0,
-  muteLogs: [],
-  groups: {}
+// ================= CONFIGURATION =================
+const CONFIG = {
+  BOT_TOKEN: "8303975726:AAGZiiWDhDreypBMP8F5U2mA88sGB0411co",
+  OWNER_ID: "8160406698",
+  MUTE_DURATION: 2 * 60 * 1000, // 2 minutes in milliseconds
+  DELETE_NOTICE_DELAY: 10000, // 10 seconds
+  BLOCKED_PATTERNS: [
+    "https?://",
+    "www\\.",
+    "t\\.me/",
+    "@[a-zA-Z0-9_]{3,}"
+  ]
 };
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(200).send("OK");
+// ================= MEMORY DATABASE =================
+const DB = {
+  enabled: true,
+  stats: {
+    deletes: 0,
+    mutes: 0
+  },
+  muteLogs: [],   // Format: {user, chat, start, end, userId}
+  groups: {}      // Format: {chatId: chatTitle}
+};
 
-  // ========== CONFIG ==========
-  const BOT_TOKEN = "8303975726:AAGZiiWDhDreypBMP8F5U2mA88sGB0411co";
-  const OWNER_ID = "8160406698";
-  const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-  const upd = req.body;
-
-  // ================= BOT ADMIN ADD NOTIFY =================
-  if (upd.my_chat_member) {
-    const chat = upd.my_chat_member.chat;
-    const newStatus = upd.my_chat_member.new_chat_member?.status;
-
-    if (newStatus === "administrator") {
-      DB.groups[chat.id] = chat.title || "No title";
-
-      await fetch(`${API}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: OWNER_ID,
-          text:
-`🔔 BOT ADDED AS ADMIN
-
-👥 Group: ${chat.title}
-🆔 ID: ${chat.id}
-⏰ Time: ${new Date().toLocaleString()}`
-        })
-      });
-    }
-    return res.end();
+// ================= UTILITY FUNCTIONS =================
+class BotAPI {
+  constructor(token) {
+    this.baseURL = `https://api.telegram.org/bot${token}`;
   }
 
-  const msg = upd.message || upd.edited_message;
-  if (!msg) return res.end();
-
-  const chat = msg.chat;
-  const chatId = chat.id;
-  const text = msg.text || "";
-  const user = msg.from;
-  const userId = user.id;
-  const username = user.username ? `@${user.username}` : "User";
-
-  // ================= START -> HELP =================
-  let cmd = text;
-  if (cmd === "/start" || cmd.startsWith("/start@")) cmd = "/help";
-
-  // ================= HELP =================
-  if (cmd === "/help" || cmd.startsWith("/help@")) {
-    await fetch(`${API}/sendMessage`, {
+  async sendRequest(endpoint, data) {
+    return fetch(`${this.baseURL}/${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text:
-`🤖 BOT HELP
-
-🚫 Link / @mention → Warn + Delete + 2 min mute  
-👮 Admin → Ignore  
-🆔 /groupid → Group info (admin only)
-
-🧑‍💼 OWNER COMMANDS  
-/panel /on /off  
-/stats /groups /mutes
-
-⚠️ Bot must be admin  
-⚙️ Privacy → OFF`
-      })
-    });
-    return res.end();
+      body: JSON.stringify(data)
+    }).then(r => r.json());
   }
 
-  // ================= OWNER PANEL =================
-  if (chat.type === "private" && String(userId) === String(OWNER_ID)) {
-    let reply = null;
-
-    if (cmd === "/panel") {
-      reply =
-`🧑‍💼 OWNER CONTROL PANEL
-
-🛡 Protection : ${DB.enabled ? "ON ✅" : "OFF ❌"}
-
-📊 Stats
-• Deletes : ${DB.deletes}
-• Mutes   : ${DB.mutes}
-
-⚙ Commands
-/on   → Enable
-/off  → Disable
-/stats
-/groups
-/mutes`;
-    }
-
-    if (cmd === "/on") reply = "✅ Protection ENABLED";
-    if (cmd === "/off") reply = "❌ Protection DISABLED";
-
-    if (cmd === "/stats") {
-      reply =
-`📊 BOT STATS
-
-🗑 Deleted : ${DB.deletes}
-🔇 Muted  : ${DB.mutes}`;
-    }
-
-    if (cmd === "/groups") {
-      reply = Object.entries(DB.groups)
-        .map(([id, name]) => `• ${name}\n  └ ${id}`)
-        .join("\n\n") || "No groups found";
-    }
-
-    if (cmd === "/mutes") {
-      reply = DB.muteLogs.slice(-10).map(m =>
-`👤 ${m.user}
-🏷 ${m.chat}
-🕒 ${m.start} → ${m.end}`).join("\n\n") || "No mute history";
-    }
-
-    if (reply) {
-      await fetch(`${API}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text: reply })
-      });
-    }
-    return res.end();
+  async sendMessage(chatId, text) {
+    return this.sendRequest("sendMessage", { chat_id: chatId, text });
   }
 
-  // ================= GROUP ONLY =================
-  if (!DB.enabled) return res.end();
-  if (!["group", "supergroup"].includes(chat.type)) return res.end();
+  async deleteMessage(chatId, messageId) {
+    return this.sendRequest("deleteMessage", { chat_id: chatId, message_id: messageId });
+  }
 
-  // ================= BLOCK LINK / @ =================
-  const blockRegex = /(https?:\/\/|www\.|t\.me\/|@[a-zA-Z0-9_]{3,})/i;
-  if (!blockRegex.test(text)) return res.end();
-
-  // ================= ADMIN CHECK =================
-  const member = await fetch(`${API}/getChatMember`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, user_id: userId })
-  }).then(r => r.json());
-
-  if (["administrator", "creator"].includes(member?.result?.status)) return res.end();
-
-  // ================= WARNING MESSAGE =================
-  const warn = await fetch(`${API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: `⚠️ ${username}\n❌ লিংক দিলে আর চুদে দিবো!`
-    })
-  }).then(r => r.json());
-
-  setTimeout(() => {
-    fetch(`${API}/deleteMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: warn.result.message_id
-      })
-    });
-  }, 5000);
-
-  // ================= DELETE MESSAGE =================
-  await fetch(`${API}/deleteMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      message_id: msg.message_id
-    })
-  });
-  DB.deletes++;
-
-  // ================= MUTE 2 MIN =================
-  const end = Math.floor(Date.now() / 1000) + 120;
-
-  await fetch(`${API}/restrictChatMember`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  async restrictUser(chatId, userId, untilDate) {
+    return this.sendRequest("restrictChatMember", {
       chat_id: chatId,
       user_id: userId,
       permissions: { can_send_messages: false },
-      until_date: end
-    })
-  });
-  DB.mutes++;
+      until_date: untilDate
+    });
+  }
 
-  DB.muteLogs.push({
-    user: username,
-    chat: chat.title,
-    start: new Date().toLocaleString(),
-    end: new Date(Date.now() + 120000).toLocaleString()
-  });
+  async getChatMember(chatId, userId) {
+    return this.sendRequest("getChatMember", { chat_id: chatId, user_id: userId });
+  }
 
-  res.end();
+  async getChatAdministrators(chatId) {
+    return this.sendRequest("getChatAdministrators", { chat_id: chatId });
+  }
+}
+
+const bot = new BotAPI(CONFIG.BOT_TOKEN);
+
+// ================= ADMIN MANAGEMENT =================
+class AdminManager {
+  static groupAdmins = {}; // {chatId: [adminUserIds]}
+
+  // Fetch and cache group administrators
+  static async refreshGroupAdmins(chatId) {
+    try {
+      const response = await bot.getChatAdministrators(chatId);
+      if (response.ok) {
+        const adminIds = response.result.map(admin => admin.user.id);
+        this.groupAdmins[chatId] = adminIds;
+        console.log(`Refreshed admins for group ${chatId}: ${adminIds.join(', ')}`);
+        return adminIds;
+      }
+    } catch (error) {
+      console.error(`Failed to fetch admins for group ${chatId}:`, error);
+    }
+    return [];
+  }
+
+  // Check if user is group admin (with caching)
+  static async isGroupAdmin(chatId, userId) {
+    // Always check owner (global admin)
+    if (String(userId) === String(CONFIG.OWNER_ID)) {
+      return true;
+    }
+
+    // Check cached admins
+    if (this.groupAdmins[chatId] && this.groupAdmins[chatId].includes(userId)) {
+      return true;
+    }
+
+    // If not in cache, fetch fresh data
+    const admins = await this.refreshGroupAdmins(chatId);
+    return admins.includes(userId);
+  }
+
+  // Clear cache for a specific group
+  static clearCache(chatId) {
+    delete this.groupAdmins[chatId];
+  }
+
+  // Periodically refresh admin cache (optional)
+  static startAutoRefresh(intervalMinutes = 5) {
+    setInterval(() => {
+      console.log("Auto-refreshing admin caches...");
+      this.groupAdmins = {};
+    }, intervalMinutes * 60 * 1000);
+  }
+}
+
+// Start auto-refresh (uncomment if needed)
+// AdminManager.startAutoRefresh(5);
+
+// ================= MESSAGE HANDLERS =================
+class MessageHandlers {
+  static async handleHelp(chatId) {
+    const helpText = `🤖 **BOT HELP MENU**
+
+👥 **GROUP PROTECTION**
+• Links & Mentions → Auto Delete (Non-Admins Only)
+• Offenders → 2 Minute Mute (Non-Admins Only)
+• Group Admins & Owner → Allowed to Post Links
+• /groupid → Admin Only Command
+
+👑 **OWNER COMMANDS** (Private Only)
+• /panel → Bot Status Dashboard
+• /on /off → Toggle Protection
+• /stats → Protection Statistics
+• /mutes → Recent Mute Records
+• /groups → Protected Groups List
+
+⚙️ **REQUIREMENTS**
+• Bot must be Administrator
+• Set Privacy to OFF in BotFather
+• Grant Delete Messages permission
+
+📝 **NOTE:** 
+✅ Group Admins & Owner can post links
+❌ Regular members cannot post links
+🛡️ Bot respects group hierarchy`;
+
+    await bot.sendMessage(chatId, helpText);
+  }
+
+  static async handleGroupInfo(chatId, chat) {
+    // First, refresh admin list for this group
+    await AdminManager.refreshGroupAdmins(chatId);
+    const adminCount = AdminManager.groupAdmins[chatId]?.length || 0;
+
+    const message = await bot.sendMessage(chatId,
+      `👥 **GROUP INFORMATION**
+• **Name:** ${chat.title}
+• **ID:** \`${chatId}\`
+• **Type:** ${chat.type}
+• **Admins:** ${adminCount} users
+• **Protection:** ${DB.enabled ? "Active" : "Inactive"}
+
+⚠️ This message will auto-delete in 10 seconds.`
+    );
+
+    // Auto-delete after delay
+    setTimeout(async () => {
+      try {
+        await bot.deleteMessage(chatId, message.result.message_id);
+      } catch (error) {
+        console.error("Failed to delete group info:", error);
+      }
+    }, CONFIG.DELETE_NOTICE_DELAY);
+  }
+
+  static async handleOwnerPanel(chatId, userId, cmd) {
+    const panels = {
+      "/panel": `🧑‍💼 **OWNER CONTROL PANEL**
+
+• **Protection:** ${DB.enabled ? "🟢 ACTIVE" : "🔴 DISABLED"}
+• **Messages Deleted:** ${DB.stats.deletes}
+• **Users Muted:** ${DB.stats.mutes}
+• **Groups Protected:** ${Object.keys(DB.groups).length}
+
+📋 **Admin Protection:** ENABLED
+✅ Group admins can post links
+✅ Bot owner can post links
+❌ Regular members restricted
+
+Use /on or /off to toggle protection.`,
+
+      "/stats": `📊 **PROTECTION STATISTICS**
+
+• **Total Deletes:** ${DB.stats.deletes}
+• **Total Mutes:** ${DB.stats.mutes}
+• **Recent Mutes:** ${DB.muteLogs.length} (last 24h)
+• **Active Groups:** ${Object.keys(DB.groups).length}
+• **Cached Admins:** ${Object.keys(AdminManager.groupAdmins).length} groups`,
+
+      "/groups": `🛡️ **PROTECTED GROUPS**\n\n${
+        Object.entries(DB.groups)
+          .map(([id, name], index) => {
+            const adminCount = AdminManager.groupAdmins[id]?.length || "?";
+            return `${index + 1}. ${name} (\`${id}\`) - ${adminCount} admins`;
+          })
+          .join("\n") || "No groups added yet."
+      }`,
+
+      "/mutes": `📋 **RECENT MUTE RECORDS**\n\n${
+        DB.muteLogs
+          .slice(-10)
+          .reverse()
+          .map((m, i) =>
+            `**${i + 1}. ${m.user}**
+• Group: ${m.chat}
+• Muted: ${m.start}
+• Until: ${m.end}
+• User ID: ${m.userId}
+• Duration: 2 minutes`
+          ).join("\n\n") || "No mute records found."
+      }`
+    };
+
+    if (panels[cmd]) {
+      await bot.sendMessage(chatId, panels[cmd]);
+    }
+  }
+
+  static async handleAdminAdded(chat, ownerId) {
+    DB.groups[chat.id] = chat.title || "Unnamed Group";
+
+    // Refresh admin list for this new group
+    await AdminManager.refreshGroupAdmins(chat.id);
+
+    const notification = `🟢 **BOT ADDED AS ADMINISTRATOR**
+
+• **Group:** ${chat.title}
+• **ID:** \`${chat.id}\`
+• **Type:** ${chat.type}
+• **Admins:** ${AdminManager.groupAdmins[chat.id]?.length || 0} users
+• **Time:** ${new Date().toLocaleString()}
+
+✅ **Admin Protection Active:**
+• Group admins can post links
+• Regular members restricted
+• Bot protection is now active in this group.`;
+
+    await bot.sendMessage(ownerId, notification);
+  }
+}
+
+// ================= SECURITY FUNCTIONS =================
+class SecurityManager {
+  static isBlockedContent(text) {
+    const pattern = new RegExp(CONFIG.BLOCKED_PATTERNS.join("|"), "i");
+    return pattern.test(text);
+  }
+
+  static async enforceRules(chatId, userId, messageId, username, chatTitle) {
+    try {
+      // Delete the violating message
+      await bot.deleteMessage(chatId, messageId);
+      DB.stats.deletes++;
+
+      // Calculate mute expiration
+      const muteStart = new Date();
+      const muteEnd = new Date(Date.now() + CONFIG.MUTE_DURATION);
+      const untilUnix = Math.floor(muteEnd.getTime() / 1000);
+
+      // Apply mute restriction
+      await bot.restrictUser(chatId, userId, untilUnix);
+      DB.stats.mutes++;
+
+      // Log the action
+      DB.muteLogs.push({
+        user: username,
+        userId: userId,
+        chat: chatTitle,
+        start: muteStart.toLocaleString(),
+        end: muteEnd.toLocaleString(),
+        timestamp: Date.now(),
+        note: "Regular member (non-admin)"
+      });
+
+      // Keep only last 100 logs to prevent memory issues
+      if (DB.muteLogs.length > 100) {
+        DB.muteLogs.shift();
+      }
+
+      console.log(`Protected: Deleted message from regular member ${username} in ${chatTitle}`);
+    } catch (error) {
+      console.error("Protection action failed:", error);
+    }
+  }
+}
+
+// ================= MAIN HANDLER =================
+export default async function handler(req, res) {
+  // Only accept POST requests
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  try {
+    const update = req.body;
+
+    // Handle bot being added as admin
+    if (update.my_chat_member) {
+      const { chat, new_chat_member } = update.my_chat_member;
+      if (new_chat_member?.status === "administrator") {
+        await MessageHandlers.handleAdminAdded(chat, CONFIG.OWNER_ID);
+      }
+      return res.status(200).end();
+    }
+
+    // Extract message data
+    const message = update.message || update.edited_message;
+    if (!message) return res.status(200).end();
+
+    const { chat, from: user, text = "" } = message;
+    const chatId = chat.id;
+    const userId = user.id;
+    const username = user.username ? `@${user.username}` : `User ${userId}`;
+    const isPrivateChat = chat.type === "private";
+
+    // Normalize command (convert /start to /help)
+    let command = text.trim();
+    if (command === "/start" || command.startsWith("/start@")) {
+      command = "/help";
+    }
+
+    // ================= COMMAND ROUTING =================
+
+    // Help command (available everywhere)
+    if (command === "/help" || command.startsWith("/help@")) {
+      await MessageHandlers.handleHelp(chatId);
+      return res.status(200).end();
+    }
+
+    // Owner commands (private chat only)
+    if (isPrivateChat && String(userId) === String(CONFIG.OWNER_ID)) {
+      const ownerCommands = ["/panel", "/on", "/off", "/stats", "/groups", "/mutes"];
+
+      if (ownerCommands.includes(command.split(" ")[0])) {
+        if (command === "/on") {
+          DB.enabled = true;
+          await bot.sendMessage(chatId, "✅ **Protection has been ENABLED**\n\nGroup admins can post links\nRegular members restricted");
+        } else if (command === "/off") {
+          DB.enabled = false;
+          await bot.sendMessage(chatId, "❌ **Protection has been DISABLED**\n\nNo link restrictions for anyone");
+        } else {
+          await MessageHandlers.handleOwnerPanel(chatId, userId, command);
+        }
+        return res.status(200).end();
+      }
+    }
+
+    // ================= GROUP PROTECTION LOGIC =================
+
+    // Check if protection is active
+    if (!DB.enabled) return res.status(200).end();
+
+    // Only proceed for groups
+    if (!["group", "supergroup"].includes(chat.type)) {
+      return res.status(200).end();
+    }
+
+    // Group info command (admin only)
+    if (command === "/groupid" || command.startsWith("/groupid@")) {
+      const isAdmin = await AdminManager.isGroupAdmin(chatId, userId);
+      if (isAdmin) {
+        await MessageHandlers.handleGroupInfo(chatId, chat);
+      }
+      return res.status(200).end();
+    }
+
+    // Check for blocked content
+    if (!SecurityManager.isBlockedContent(text)) {
+      return res.status(200).end();
+    }
+
+    // ================= CRITICAL: CHECK IF USER IS ADMIN =================
+    // This is the key change - admins can post links
+    const isAdmin = await AdminManager.isGroupAdmin(chatId, userId);
+    
+    if (isAdmin) {
+      console.log(`Allowed: Admin ${username} posted link in ${chat.title}`);
+      return res.status(200).end(); // Allow admin to post links
+    }
+
+    // Apply protection measures only for non-admins
+    await SecurityManager.enforceRules(
+      chatId,
+      userId,
+      message.message_id,
+      username,
+      chat.title || "Unknown Group"
+    );
+
+    res.status(200).end();
+  } catch (error) {
+    console.error("Handler error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
 }
