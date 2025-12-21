@@ -3,7 +3,7 @@ let DB = {
   enabled: true,
   deletes: 0,
   mutes: 0,
-  muteLogs: [],   // {user, chat, start, end}
+  muteLogs: [],
   groups: {}
 };
 
@@ -17,7 +17,7 @@ export default async function handler(req, res) {
 
   const upd = req.body;
 
-  // ========== BOT ADMIN ADD NOTIFY ==========
+  // ================= BOT ADMIN ADD NOTIFY =================
   if (upd.my_chat_member) {
     const chat = upd.my_chat_member.chat;
     const newStatus = upd.my_chat_member.new_chat_member?.status;
@@ -31,11 +31,11 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           chat_id: OWNER_ID,
           text:
-`🔔 BOT ADMIN ADDED
+`🔔 BOT ADDED AS ADMIN
 
-• Group: ${chat.title}
-• Group ID: ${chat.id}
-• Time: ${new Date().toLocaleString()}`
+👥 Group: ${chat.title}
+🆔 ID: ${chat.id}
+⏰ Time: ${new Date().toLocaleString()}`
         })
       });
     }
@@ -50,15 +50,13 @@ export default async function handler(req, res) {
   const text = msg.text || "";
   const user = msg.from;
   const userId = user.id;
-  const username = user.username ? `@${user.username}` : "user";
+  const username = user.username ? `@${user.username}` : "User";
 
-  // ================= /start -> /help (ALL CHAT) =================
+  // ================= START -> HELP =================
   let cmd = text;
-  if (cmd === "/start" || cmd.startsWith("/start@")) {
-    cmd = "/help";
-  }
+  if (cmd === "/start" || cmd.startsWith("/start@")) cmd = "/help";
 
-  // ================= HELP (ALL CHAT) =================
+  // ================= HELP =================
   if (cmd === "/help" || cmd.startsWith("/help@")) {
     await fetch(`${API}/sendMessage`, {
       method: "POST",
@@ -68,19 +66,16 @@ export default async function handler(req, res) {
         text:
 `🤖 BOT HELP
 
-👥 GROUP
-• Link / @mention → delete
-• Member → 2 min mute
-• Admin → ignore
-• /groupid (admin)
+🚫 Link / @mention → Warn + Delete + 2 min mute  
+👮 Admin → Ignore  
+🆔 /groupid → Group info (admin only)
 
-🧑‍💼 OWNER
-• /panel /on /off
-• /stats /mutes /groups
+🧑‍💼 OWNER COMMANDS  
+/panel /on /off  
+/stats /groups /mutes
 
-ℹ️ Note
-• Bot must be admin
-• BotFather → Privacy OFF`
+⚠️ Bot must be admin  
+⚙️ Privacy → OFF`
       })
     });
     return res.end();
@@ -92,35 +87,44 @@ export default async function handler(req, res) {
 
     if (cmd === "/panel") {
       reply =
-`🧑‍💼 PANEL
+`🧑‍💼 OWNER CONTROL PANEL
 
-• Protection: ${DB.enabled ? "ON ✅" : "OFF ❌"}
-• Deletes: ${DB.deletes}
-• Mutes: ${DB.mutes}`;
+🛡 Protection : ${DB.enabled ? "ON ✅" : "OFF ❌"}
+
+📊 Stats
+• Deletes : ${DB.deletes}
+• Mutes   : ${DB.mutes}
+
+⚙ Commands
+/on   → Enable
+/off  → Disable
+/stats
+/groups
+/mutes`;
     }
 
-    if (cmd === "/on") reply = (DB.enabled = true, "✅ Protection ON");
-    if (cmd === "/off") reply = (DB.enabled = false, "❌ Protection OFF");
+    if (cmd === "/on") reply = "✅ Protection ENABLED";
+    if (cmd === "/off") reply = "❌ Protection DISABLED";
 
     if (cmd === "/stats") {
       reply =
-`📊 STATS
-• Deletes: ${DB.deletes}
-• Mutes: ${DB.mutes}`;
+`📊 BOT STATS
+
+🗑 Deleted : ${DB.deletes}
+🔇 Muted  : ${DB.mutes}`;
     }
 
     if (cmd === "/groups") {
       reply = Object.entries(DB.groups)
-        .map(([id, name]) => `• ${name} (${id})`)
-        .join("\n") || "No groups";
+        .map(([id, name]) => `• ${name}\n  └ ${id}`)
+        .join("\n\n") || "No groups found";
     }
 
     if (cmd === "/mutes") {
       reply = DB.muteLogs.slice(-10).map(m =>
 `👤 ${m.user}
-• Group: ${m.chat}
-• Start: ${m.start}
-• End: ${m.end}`).join("\n\n") || "No mute data";
+🏷 ${m.chat}
+🕒 ${m.start} → ${m.end}`).join("\n\n") || "No mute history";
     }
 
     if (reply) {
@@ -137,46 +141,7 @@ export default async function handler(req, res) {
   if (!DB.enabled) return res.end();
   if (!["group", "supergroup"].includes(chat.type)) return res.end();
 
-  // ================= /groupid =================
-  if (cmd === "/groupid" || cmd.startsWith("/groupid@")) {
-    const m = await fetch(`${API}/getChatMember`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, user_id: userId })
-    }).then(r => r.json());
-
-    if (!["administrator", "creator"].includes(m?.result?.status)) {
-      return res.end();
-    }
-
-    const r = await fetch(`${API}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text:
-`👥 GROUP INFO
-• Name: ${chat.title}
-• ID: ${chatId}
-• Type: ${chat.type}`
-      })
-    }).then(r => r.json());
-
-    setTimeout(() => {
-      fetch(`${API}/deleteMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          message_id: r.result.message_id
-        })
-      });
-    }, 10000);
-
-    return res.end();
-  }
-
-  // ================= BLOCK (LINK + @MENTION) =================
+  // ================= BLOCK LINK / @ =================
   const blockRegex = /(https?:\/\/|www\.|t\.me\/|@[a-zA-Z0-9_]{3,})/i;
   if (!blockRegex.test(text)) return res.end();
 
@@ -187,9 +152,28 @@ export default async function handler(req, res) {
     body: JSON.stringify({ chat_id: chatId, user_id: userId })
   }).then(r => r.json());
 
-  if (["administrator", "creator"].includes(member?.result?.status)) {
-    return res.end();
-  }
+  if (["administrator", "creator"].includes(member?.result?.status)) return res.end();
+
+  // ================= WARNING MESSAGE =================
+  const warn = await fetch(`${API}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: `⚠️ ${username}\n❌ লিংক দিলে আর চুদে দিবো!`
+    })
+  }).then(r => r.json());
+
+  setTimeout(() => {
+    fetch(`${API}/deleteMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: warn.result.message_id
+      })
+    });
+  }, 5000);
 
   // ================= DELETE MESSAGE =================
   await fetch(`${API}/deleteMessage`, {
@@ -203,9 +187,7 @@ export default async function handler(req, res) {
   DB.deletes++;
 
   // ================= MUTE 2 MIN =================
-  const start = new Date();
-  const end = new Date(Date.now() + 120000);
-  const until = Math.floor(end.getTime() / 1000);
+  const end = Math.floor(Date.now() / 1000) + 120;
 
   await fetch(`${API}/restrictChatMember`, {
     method: "POST",
@@ -214,7 +196,7 @@ export default async function handler(req, res) {
       chat_id: chatId,
       user_id: userId,
       permissions: { can_send_messages: false },
-      until_date: until
+      until_date: end
     })
   });
   DB.mutes++;
@@ -222,8 +204,8 @@ export default async function handler(req, res) {
   DB.muteLogs.push({
     user: username,
     chat: chat.title,
-    start: start.toLocaleString(),
-    end: end.toLocaleString()
+    start: new Date().toLocaleString(),
+    end: new Date(Date.now() + 120000).toLocaleString()
   });
 
   res.end();
