@@ -297,7 +297,7 @@ class Keyboards {
       inline_keyboard: [[
         {
           text: "➕ Add Me to Group",
-          url: `https://t.me/${process.env.BOT_USERNAME || "your_bot"}?startgroup=admin`
+          url: `https://t.me/${process.env.BOT_USERNAME || "linkremovepowerbot"}?startgroup=admin`
         }
       ]]
     };
