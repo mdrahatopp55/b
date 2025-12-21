@@ -17,10 +17,12 @@ const DB = {
   enabled: true,
   stats: {
     deletes: 0,
-    mutes: 0
+    mutes: 0,
+    broadcasts: 0
   },
   muteLogs: [],   // Format: {user, chat, start, end, userId}
   groups: {},     // Format: {chatId: {title, admins: [], addedDate}}
+  broadcastQueue: [], // For broadcasting messages
   pendingPrompts: new Map() // For admin promotion prompts
 };
 
@@ -80,6 +82,10 @@ class BotAPI {
       show_alert: showAlert
     });
   }
+
+  async getMe() {
+    return this.sendRequest("getMe", {});
+  }
 }
 
 const bot = new BotAPI(CONFIG.BOT_TOKEN);
@@ -87,18 +93,16 @@ const bot = new BotAPI(CONFIG.BOT_TOKEN);
 // ================= ADMIN MANAGEMENT =================
 class AdminManager {
   static groupAdmins = {}; // {chatId: [adminUserIds]}
-  static requiredPermissions = {
-    can_delete_messages: true,
-    can_restrict_members: true,
-    can_pin_messages: true,
-    can_invite_users: true,
-    can_promote_members: false,
-    can_change_info: true,
-    can_post_messages: true,
-    can_edit_messages: true,
-    can_manage_chat: true,
-    can_manage_video_chats: true
-  };
+  static botUsername = null;
+
+  // Get bot username
+  static async getBotUsername() {
+    if (!this.botUsername) {
+      const me = await bot.getMe();
+      this.botUsername = me.result.username;
+    }
+    return this.botUsername;
+  }
 
   // Fetch and cache group administrators
   static async refreshGroupAdmins(chatId) {
@@ -133,24 +137,30 @@ class AdminManager {
     return admins.includes(userId);
   }
 
-  // Request admin permissions automatically
-  static async requestAdminPermissions(chatId, userId, chatTitle) {
+  // Request FULL 100% admin permissions automatically
+  static async requestFullAdminPermissions(chatId, userId, chatTitle) {
     try {
+      const botUsername = await this.getBotUsername();
+      
       const promotionMessage = await bot.sendMessage(
         chatId,
-        `🔔 <b>ADMIN PERMISSION REQUEST</b>\n\n` +
-        `To function properly, I need the following permissions:\n\n` +
-        `✅ <b>Delete Messages</b> - To remove links\n` +
+        `🔔 <b>ADMIN PERMISSION REQUEST - 100% FULL PERMISSIONS NEEDED</b>\n\n` +
+        `⚠️ <b>I need FULL ADMIN PERMISSIONS to function:</b>\n\n` +
+        `✅ <b>Delete Messages</b> - To remove spam links\n` +
         `✅ <b>Restrict Members</b> - To mute violators\n` +
         `✅ <b>Ban Users</b> - For serious violations\n` +
         `✅ <b>Pin Messages</b> - For important notices\n` +
-        `✅ <b>Invite Users</b> - To manage group\n\n` +
-        `Please promote me with full permissions by clicking the button below:`,
+        `✅ <b>Invite Users</b> - To manage group\n` +
+        `✅ <b>Manage Chat</b> - Full chat control\n` +
+        `✅ <b>Edit Messages</b> - For announcements\n` +
+        `✅ <b>Post Messages</b> - For broadcasting\n` +
+        `✅ <b>Change Info</b> - Update group info\n\n` +
+        `<b>Click below to add me with FULL PERMISSIONS:</b>`,
         {
           inline_keyboard: [[
             {
-              text: "🚀 PROMOTE TO ADMIN",
-              url: `https://t.me/${(await bot.getMe()).result.username}?startgroup=admin`
+              text: "🚀 ADD ME TO GROUP (FULL ADMIN)",
+              url: `https://t.me/${botUsername}?startgroup=admin&admin=`
             }
           ]]
         }
@@ -163,7 +173,7 @@ class AdminManager {
         chatTitle
       });
 
-      // Auto-delete promotion message after 1 minute
+      // Auto-delete promotion message after 2 minutes
       setTimeout(async () => {
         try {
           await bot.deleteMessage(chatId, promotionMessage.result.message_id);
@@ -171,26 +181,87 @@ class AdminManager {
         } catch (e) {
           console.error("Failed to delete promotion message:", e);
         }
-      }, 60000);
+      }, 120000);
 
       // Notify owner
       await bot.sendMessage(
         CONFIG.OWNER_ID,
-        `📢 <b>Admin Permission Requested</b>\n\n` +
+        `📢 <b>Full Admin Permission Requested - 100%</b>\n\n` +
         `• Group: ${chatTitle}\n` +
         `• Group ID: <code>${chatId}</code>\n` +
         `• Requested by: <code>${userId}</code>\n` +
-        `• Time: ${new Date().toLocaleString()}`
+        `• Time: ${new Date().toLocaleString()}\n` +
+        `• Status: FULL PERMISSION REQUEST SENT`
       );
+
+      return promotionMessage;
 
     } catch (error) {
       console.error("Failed to request admin permissions:", error);
+      return null;
     }
   }
 
   // Clear cache for a specific group
   static clearCache(chatId) {
     delete this.groupAdmins[chatId];
+  }
+}
+
+// ================= BROADCAST SYSTEM =================
+class BroadcastSystem {
+  static async sendBroadcast(messageText, ownerId) {
+    try {
+      const groups = Object.keys(DB.groups);
+      let success = 0;
+      let failed = 0;
+      let results = [];
+
+      await bot.sendMessage(ownerId, 
+        `📢 <b>BROADCAST STARTED</b>\n\n` +
+        `• Total Groups: ${groups.length}\n` +
+        `• Message: ${messageText.substring(0, 50)}...\n` +
+        `• Status: SENDING...`
+      );
+
+      for (const chatId of groups) {
+        try {
+          await bot.sendMessage(chatId, messageText);
+          success++;
+          results.push({ chatId, status: "✅ Success" });
+        } catch (error) {
+          failed++;
+          results.push({ chatId, status: "❌ Failed", error: error.message });
+        }
+
+        // Delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      DB.stats.broadcasts++;
+
+      // Send final report
+      const reportText = 
+        `📢 <b>BROADCAST COMPLETED</b>\n\n` +
+        `• Total Groups: ${groups.length}\n` +
+        `• ✅ Successful: ${success}\n` +
+        `• ❌ Failed: ${failed}\n` +
+        `• Total Broadcasts: ${DB.stats.broadcasts}\n\n` +
+        `<b>Results:</b>\n` +
+        results.slice(0, 10).map(r => 
+          `• ${r.chatId}: ${r.status}`
+        ).join("\n") +
+        (results.length > 10 ? `\n\n...and ${results.length - 10} more` : "");
+
+      await bot.sendMessage(ownerId, reportText);
+
+      return { success, failed, total: groups.length };
+
+    } catch (error) {
+      console.error("Broadcast error:", error);
+      await bot.sendMessage(ownerId, `❌ <b>BROADCAST FAILED</b>\n\nError: ${error.message}`);
+      return null;
+    }
   }
 }
 
@@ -204,7 +275,7 @@ class Keyboards {
           { text: "📊 Stats", callback_data: "stats" }
         ],
         [
-          { text: "👥 Groups", callback_data: "groups" },
+          { text: "👥 Groups List", callback_data: "groups" },
           { text: "📝 Mute Logs", callback_data: "mutes" }
         ],
         [
@@ -212,20 +283,34 @@ class Keyboards {
           { text: "❌ Disable", callback_data: "disable" }
         ],
         [
-          { text: "➕ Add Admin to Group", callback_data: "add_admin" }
+          { text: "📢 Send Broadcast", callback_data: "broadcast" }
+        ],
+        [
+          { text: "➕ Add Me to Group", callback_data: "add_to_group" }
         ]
       ]
     };
   }
 
-  static adminPromotion(chatId, chatTitle) {
+  static addToGroupButton() {
     return {
       inline_keyboard: [[
         {
-          text: `🚀 Promote in ${chatTitle.substring(0, 15)}...`,
-          url: `https://t.me/${process.env.BOT_USERNAME || "your_bot"}?startgroup=admin&admin=`
+          text: "➕ Add Me to Group",
+          url: `https://t.me/${process.env.BOT_USERNAME || "your_bot"}?startgroup=admin`
         }
       ]]
+    };
+  }
+
+  static broadcastConfirm() {
+    return {
+      inline_keyboard: [
+        [
+          { text: "✅ Confirm Broadcast", callback_data: "confirm_broadcast" },
+          { text: "❌ Cancel", callback_data: "cancel_broadcast" }
+        ]
+      ]
     };
   }
 
@@ -234,42 +319,66 @@ class Keyboards {
       inline_keyboard: [[{ text: "🔙 Back", callback_data: "back" }]]
     };
   }
+
+  static cancelButton() {
+    return {
+      inline_keyboard: [[{ text: "❌ Cancel", callback_data: "cancel" }]]
+    };
+  }
 }
 
 // ================= MESSAGE HANDLERS =================
 class MessageHandlers {
+  static async handleStart(chatId, userId) {
+    const startText = `<b>🤖 WELCOME TO LINK PROTECTION BOT</b>
+
+✅ <b>Fully Automatic Link Protection</b>
+✅ <b>Admin-Friendly (Admins can post links)</b>
+✅ <b>Auto 100% Permission Request</b>
+✅ <b>Broadcast System Included</b>
+
+<b>Click the button below to add me to your group:</b>`;
+
+    await bot.sendMessage(chatId, startText, Keyboards.addToGroupButton());
+    
+    // Also send help
+    await this.handleHelp(chatId);
+  }
+
   static async handleHelp(chatId) {
-    const helpText = `<b>🤖 LINK PROTECTION BOT</b>
+    const helpText = `<b>🤖 LINK PROTECTION BOT - FULL FEATURES</b>
 
-<b>👥 GROUP PROTECTION</b>
-• Links & Mentions → Auto Delete (Non-Admins Only)
-• Offenders → 2 Minute Mute (Non-Admins Only)
-• Group Admins & Owner → Allowed to Post Links
-• /groupid → Admin Only Command
+<b>🔒 PROTECTION FEATURES:</b>
+• Auto Delete Links (Non-Admins Only)
+• 2 Minute Mute for Violators
+• Admin Protection (Admins can post links)
+• Full 100% Auto Permission Request
 
-<b>👑 OWNER COMMANDS</b> (Private Only)
-• /panel → Interactive Control Panel
-• /on /off → Toggle Protection
-• /stats → Protection Statistics
-• /mutes → Recent Mute Records
-• /groups → Protected Groups List
+<b>🎯 COMMANDS:</b>
+• /start - Start bot & get add button
+• /help - Show this help
+• /groupid - Show group info (Admin Only)
 
-<b>➕ ADD ADMIN FEATURE</b>
-Use the "Add Admin" button in panel to automatically request full admin permissions in any group.
+<b>👑 OWNER COMMANDS:</b>
+• /panel - Control Panel with Buttons
+• /on /off - Toggle Protection
+• /stats - View Statistics
+• /broadcast - Send message to all groups
+• /groups - List all protected groups
 
-<b>⚙️ REQUIRED PERMISSIONS</b>
-✅ Delete Messages
-✅ Restrict Members
-✅ Ban Users
-✅ Pin Messages
-✅ Invite Users
+<b>🚀 ADD TO GROUP:</b>
+Use "Add Me to Group" button - I'll automatically request FULL 100% permissions!
 
-<b>📝 NOTE:</b> 
-✅ Group Admins & Owner can post links
-❌ Regular members cannot post links
-🛡️ Bot automatically requests full permissions when added`;
+<b>📢 BROADCAST SYSTEM:</b>
+Send messages to all groups with one command.
 
-    await bot.sendMessage(chatId, helpText);
+<b>⚡ 100% AUTO SETUP:</b>
+1. Add me to group
+2. I request full permissions automatically
+3. Promote me with ALL permissions
+4. Protection starts immediately!`;
+
+    await bot.sendMessage(chatId, helpText, Keyboards.addToGroupButton());
   }
 
   static async handleGroupInfo(chatId, chat) {
@@ -306,14 +415,15 @@ Use the "Add Admin" button in panel to automatically request full admin permissi
 <b>• Messages Deleted:</b> ${DB.stats.deletes}
 <b>• Users Muted:</b> ${DB.stats.mutes}
 <b>• Groups Protected:</b> ${Object.keys(DB.groups).length}
+<b>• Broadcasts Sent:</b> ${DB.stats.broadcasts}
 
 <b>📋 Admin Protection:</b> ENABLED
 ✅ Group admins can post links
 ✅ Bot owner can post links
 ❌ Regular members restricted
 
-<b>🔄 Auto Admin Request:</b> ENABLED
-Bot automatically requests full permissions when added to groups.`;
+<b>🚀 Auto Setup:</b> 100% FULL PERMISSIONS
+Bot automatically requests FULL permissions when added to groups.`;
 
     if (isCallback && callbackQueryId) {
       await bot.answerCallbackQuery(callbackQueryId);
@@ -327,20 +437,21 @@ Bot automatically requests full permissions when added to groups.`;
     DB.groups[chat.id] = {
       title: chat.title || "Unnamed Group",
       admins: [],
-      addedDate: new Date().toISOString()
+      addedDate: new Date().toISOString(),
+      lastActive: new Date().toISOString()
     };
 
     // Refresh admin list for this new group
     await AdminManager.refreshGroupAdmins(chat.id);
 
-    // Auto-request admin permissions
-    await AdminManager.requestAdminPermissions(
+    // Auto-request FULL 100% admin permissions
+    await AdminManager.requestFullAdminPermissions(
       chat.id,
       ownerId,
       chat.title || "Unnamed Group"
     );
 
-    const notification = `<b>🟢 BOT ADDED TO GROUP</b>
+    const notification = `<b>🟢 BOT ADDED TO GROUP - AUTO SETUP STARTED</b>
 
 <b>• Group:</b> ${chat.title}
 <b>• ID:</b> <code>${chat.id}</code>
@@ -352,10 +463,53 @@ Bot automatically requests full permissions when added to groups.`;
 • Group admins can post links
 • Regular members restricted
 
-🚀 <b>Auto Admin Request Sent:</b>
-I've automatically requested full admin permissions in the group.`;
+🚀 <b>FULL 100% PERMISSION REQUEST SENT:</b>
+I've automatically requested FULL admin permissions in the group.
 
-    await bot.sendMessage(ownerId, notification);
+📢 <b>Next Step:</b>
+1. Click the "Add Me to Group" button in chat
+2. Promote me with ALL permissions
+3. Protection will start automatically`;
+
+    await bot.sendMessage(ownerId, notification, Keyboards.addToGroupButton());
+  }
+
+  static async handleBroadcastCommand(chatId, userId, text) {
+    // Check if it's owner
+    if (String(userId) !== String(CONFIG.OWNER_ID)) {
+      await bot.sendMessage(chatId, "❌ <b>Unauthorized!</b>\nOnly owner can use broadcast.");
+      return;
+    }
+
+    const message = text.replace("/broadcast", "").trim();
+    
+    if (!message) {
+      await bot.sendMessage(
+        chatId,
+        `<b>📢 BROADCAST SYSTEM</b>\n\n` +
+        `Usage: <code>/broadcast your message here</code>\n\n` +
+        `Example: <code>/broadcast Hello all groups!</code>\n\n` +
+        `Total Groups: ${Object.keys(DB.groups).length}`,
+        Keyboards.backButton()
+      );
+      return;
+    }
+
+    // Store broadcast message temporarily
+    DB.broadcastQueue.push({
+      ownerId: userId,
+      message: message,
+      timestamp: Date.now()
+    });
+
+    await bot.sendMessage(
+      chatId,
+      `<b>📢 CONFIRM BROADCAST</b>\n\n` +
+      `<b>Message:</b>\n${message}\n\n` +
+      `<b>Will be sent to:</b> ${Object.keys(DB.groups).length} groups\n\n` +
+      `<b>Are you sure?</b>`,
+      Keyboards.broadcastConfirm()
+    );
   }
 
   static async handleCallbackQuery(callbackQuery, chatId, userId) {
@@ -383,8 +537,9 @@ I've automatically requested full admin permissions in the group.`;
             text: `<b>📊 PROTECTION STATISTICS</b>\n\n` +
                   `<b>• Total Deletes:</b> ${DB.stats.deletes}\n` +
                   `<b>• Total Mutes:</b> ${DB.stats.mutes}\n` +
-                  `<b>• Recent Mutes:</b> ${DB.muteLogs.length} (last 24h)\n` +
+                  `<b>• Total Broadcasts:</b> ${DB.stats.broadcasts}\n` +
                   `<b>• Active Groups:</b> ${Object.keys(DB.groups).length}\n` +
+                  `<b>• Protection:</b> ${DB.enabled ? "🟢 ON" : "🔴 OFF"}\n` +
                   `<b>• Cached Admins:</b> ${Object.keys(AdminManager.groupAdmins).length} groups`,
             parse_mode: "HTML",
             reply_markup: Keyboards.backButton()
@@ -403,7 +558,7 @@ I've automatically requested full admin permissions in the group.`;
           await bot.editMessageText({
             chat_id: chatId,
             message_id: message.message_id,
-            text: `<b>🛡️ PROTECTED GROUPS</b>\n\n${groupsText}`,
+            text: `<b>👥 PROTECTED GROUPS (${Object.keys(DB.groups).length})</b>\n\n${groupsText}`,
             parse_mode: "HTML",
             reply_markup: Keyboards.backButton()
           });
@@ -425,7 +580,7 @@ I've automatically requested full admin permissions in the group.`;
           await bot.editMessageText({
             chat_id: chatId,
             message_id: message.message_id,
-            text: `<b>📋 RECENT MUTE RECORDS</b>\n\n${mutesText}`,
+            text: `<b>📝 RECENT MUTE RECORDS</b>\n\n${mutesText}`,
             parse_mode: "HTML",
             reply_markup: Keyboards.backButton()
           });
@@ -437,7 +592,7 @@ I've automatically requested full admin permissions in the group.`;
           await bot.editMessageText({
             chat_id: chatId,
             message_id: message.message_id,
-            text: `<b>✅ PROTECTION ENABLED</b>\n\nProtection is now active in all groups.`,
+            text: `<b>✅ PROTECTION ENABLED</b>\n\nProtection is now active in all ${Object.keys(DB.groups).length} groups.`,
             parse_mode: "HTML",
             reply_markup: Keyboards.backButton()
           });
@@ -455,22 +610,72 @@ I've automatically requested full admin permissions in the group.`;
           });
           break;
 
-        case "add_admin":
+        case "add_to_group":
+          await bot.answerCallbackQuery(callbackId);
+          const botUsername = await AdminManager.getBotUsername();
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>➕ ADD ME TO GROUP</b>\n\n` +
+                  `<b>Click the button below to add me to any group:</b>\n\n` +
+                  `<b>✅ Features:</b>\n` +
+                  `• Auto 100% Permission Request\n` +
+                  `• Admin-Friendly Protection\n` +
+                  `• Link Protection System\n` +
+                  `• Broadcast Support\n\n` +
+                  `<b>I will automatically request FULL ADMIN permissions!</b>`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[
+                {
+                  text: "🚀 Add Me to Group (FULL ADMIN)",
+                  url: `https://t.me/${botUsername}?startgroup=admin&admin=`
+                }
+              ]]
+            }
+          });
+          break;
+
+        case "broadcast":
           await bot.answerCallbackQuery(callbackId);
           await bot.editMessageText({
             chat_id: chatId,
             message_id: message.message_id,
-            text: `<b>➕ ADD ADMIN TO GROUP</b>\n\n` +
-                  `To add me as admin in a group:\n\n` +
-                  `1. Add me to any group\n` +
-                  `2. I'll automatically request full admin permissions\n` +
-                  `3. Promote me with all permissions\n\n` +
-                  `Required permissions:\n` +
-                  `✅ Delete Messages\n` +
-                  `✅ Restrict Members\n` +
-                  `✅ Ban Users\n` +
-                  `✅ Pin Messages\n` +
-                  `✅ Invite Users`,
+            text: `<b>📢 BROADCAST SYSTEM</b>\n\n` +
+                  `<b>Total Groups:</b> ${Object.keys(DB.groups).length}\n\n` +
+                  `<b>Usage:</b> Send <code>/broadcast your message</code>\n\n` +
+                  `<b>Example:</b>\n<code>/broadcast Hello everyone!</code>\n\n` +
+                  `<b>Note:</b> Message will be sent to all protected groups.`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.backButton()
+          });
+          break;
+
+        case "confirm_broadcast":
+          await bot.answerCallbackQuery(callbackId, "📢 Starting broadcast...");
+          const broadcastData = DB.broadcastQueue.find(b => b.ownerId === userId);
+          if (broadcastData) {
+            await bot.editMessageText({
+              chat_id: chatId,
+              message_id: message.message_id,
+              text: `<b>📢 BROADCAST IN PROGRESS</b>\n\nSending to ${Object.keys(DB.groups).length} groups...\n\nPlease wait...`,
+              parse_mode: "HTML"
+            });
+            
+            const result = await BroadcastSystem.sendBroadcast(broadcastData.message, userId);
+            
+            // Remove from queue
+            DB.broadcastQueue = DB.broadcastQueue.filter(b => b.ownerId !== userId);
+          }
+          break;
+
+        case "cancel_broadcast":
+          await bot.answerCallbackQuery(callbackId, "❌ Broadcast cancelled");
+          DB.broadcastQueue = DB.broadcastQueue.filter(b => b.ownerId !== userId);
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>❌ BROADCAST CANCELLED</b>\n\nNo message was sent to groups.`,
             parse_mode: "HTML",
             reply_markup: Keyboards.backButton()
           });
@@ -479,6 +684,11 @@ I've automatically requested full admin permissions in the group.`;
         case "back":
           await bot.answerCallbackQuery(callbackId);
           await this.handleOwnerPanel(chatId, userId, true, callbackId);
+          break;
+
+        case "cancel":
+          await bot.answerCallbackQuery(callbackId);
+          await bot.deleteMessage(chatId, message.message_id);
           break;
       }
     } catch (error) {
@@ -578,17 +788,24 @@ export default async function handler(req, res) {
     const username = user.username ? `@${user.username}` : `User ${userId}`;
     const isPrivateChat = chat.type === "private";
 
-    // Normalize command (convert /start to /help)
+    // Normalize command
     let command = text.trim();
+    
+    // Handle /start command
     if (command === "/start" || command.startsWith("/start@")) {
-      command = "/help";
+      await MessageHandlers.handleStart(chatId, userId);
+      return res.status(200).end();
     }
 
-    // ================= COMMAND ROUTING =================
-
-    // Help command (available everywhere)
+    // Handle /help command
     if (command === "/help" || command.startsWith("/help@")) {
       await MessageHandlers.handleHelp(chatId);
+      return res.status(200).end();
+    }
+
+    // Handle /broadcast command
+    if (command.startsWith("/broadcast")) {
+      await MessageHandlers.handleBroadcastCommand(chatId, userId, command);
       return res.status(200).end();
     }
 
@@ -602,9 +819,11 @@ export default async function handler(req, res) {
       if (command === "/on") {
         DB.enabled = true;
         await bot.sendMessage(chatId, 
-          "<b>✅ PROTECTION ENABLED</b>\n\n" +
+          "<b>✅ PROTECTION ENABLED - 100% ACTIVE</b>\n\n" +
           "Link protection is now active in all groups.\n" +
-          "Group admins can post links, regular members cannot.",
+          `Total Groups: ${Object.keys(DB.groups).length}\n\n` +
+          "✅ Group admins can post links\n" +
+          "❌ Regular members restricted",
           Keyboards.mainMenu()
         );
         return res.status(200).end();
@@ -615,19 +834,33 @@ export default async function handler(req, res) {
         await bot.sendMessage(chatId,
           "<b>❌ PROTECTION DISABLED</b>\n\n" +
           "Link protection is now inactive in all groups.\n" +
-          "Everyone can post links.",
+          "Everyone can post links until re-enabled.",
           Keyboards.mainMenu()
         );
         return res.status(200).end();
       }
 
       if (command === "/stats") {
-        const statsText = `<b>📊 PROTECTION STATISTICS</b>\n\n` +
+        const statsText = `<b>📊 PROTECTION STATISTICS - 100% ACTIVE</b>\n\n` +
           `<b>• Total Deletes:</b> ${DB.stats.deletes}\n` +
           `<b>• Total Mutes:</b> ${DB.stats.mutes}\n` +
-          `<b>• Recent Mutes:</b> ${DB.muteLogs.length} (last 24h)\n` +
-          `<b>• Active Groups:</b> ${Object.keys(DB.groups).length}`;
-        await bot.sendMessage(chatId, statsText);
+          `<b>• Total Broadcasts:</b> ${DB.stats.broadcasts}\n` +
+          `<b>• Active Groups:</b> ${Object.keys(DB.groups).length}\n` +
+          `<b>• Protection:</b> ${DB.enabled ? "🟢 ON" : "🔴 OFF"}`;
+        await bot.sendMessage(chatId, statsText, Keyboards.mainMenu());
+        return res.status(200).end();
+      }
+
+      if (command === "/groups") {
+        const groupsList = Object.entries(DB.groups)
+          .map(([id, group], index) => 
+            `${index + 1}. ${group.title} (<code>${id}</code>)`
+          ).join("\n") || "No groups yet.";
+        
+        await bot.sendMessage(chatId,
+          `<b>👥 PROTECTED GROUPS (${Object.keys(DB.groups).length})</b>\n\n${groupsList}`,
+          Keyboards.addToGroupButton()
+        );
         return res.status(200).end();
       }
     }
@@ -656,7 +889,7 @@ export default async function handler(req, res) {
       return res.status(200).end();
     }
 
-    // ================= CRITICAL: CHECK IF USER IS ADMIN =================
+    // ================= CHECK IF USER IS ADMIN =================
     const isAdmin = await AdminManager.isGroupAdmin(chatId, userId);
     
     if (isAdmin) {
