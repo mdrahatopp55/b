@@ -20,7 +20,8 @@ const DB = {
     mutes: 0
   },
   muteLogs: [],   // Format: {user, chat, start, end, userId}
-  groups: {}      // Format: {chatId: chatTitle}
+  groups: {},     // Format: {chatId: {title, admins: [], addedDate}}
+  pendingPrompts: new Map() // For admin promotion prompts
 };
 
 // ================= UTILITY FUNCTIONS =================
@@ -37,8 +38,10 @@ class BotAPI {
     }).then(r => r.json());
   }
 
-  async sendMessage(chatId, text) {
-    return this.sendRequest("sendMessage", { chat_id: chatId, text });
+  async sendMessage(chatId, text, replyMarkup = null) {
+    const data = { chat_id: chatId, text, parse_mode: "HTML" };
+    if (replyMarkup) data.reply_markup = replyMarkup;
+    return this.sendRequest("sendMessage", data);
   }
 
   async deleteMessage(chatId, messageId) {
@@ -61,6 +64,22 @@ class BotAPI {
   async getChatAdministrators(chatId) {
     return this.sendRequest("getChatAdministrators", { chat_id: chatId });
   }
+
+  async promoteChatMember(chatId, userId, permissions) {
+    return this.sendRequest("promoteChatMember", {
+      chat_id: chatId,
+      user_id: userId,
+      ...permissions
+    });
+  }
+
+  async answerCallbackQuery(callbackQueryId, text = "", showAlert = false) {
+    return this.sendRequest("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      text,
+      show_alert: showAlert
+    });
+  }
 }
 
 const bot = new BotAPI(CONFIG.BOT_TOKEN);
@@ -68,6 +87,18 @@ const bot = new BotAPI(CONFIG.BOT_TOKEN);
 // ================= ADMIN MANAGEMENT =================
 class AdminManager {
   static groupAdmins = {}; // {chatId: [adminUserIds]}
+  static requiredPermissions = {
+    can_delete_messages: true,
+    can_restrict_members: true,
+    can_pin_messages: true,
+    can_invite_users: true,
+    can_promote_members: false,
+    can_change_info: true,
+    can_post_messages: true,
+    can_edit_messages: true,
+    can_manage_chat: true,
+    can_manage_video_chats: true
+  };
 
   // Fetch and cache group administrators
   static async refreshGroupAdmins(chatId) {
@@ -102,50 +133,141 @@ class AdminManager {
     return admins.includes(userId);
   }
 
+  // Request admin permissions automatically
+  static async requestAdminPermissions(chatId, userId, chatTitle) {
+    try {
+      const promotionMessage = await bot.sendMessage(
+        chatId,
+        `🔔 <b>ADMIN PERMISSION REQUEST</b>\n\n` +
+        `To function properly, I need the following permissions:\n\n` +
+        `✅ <b>Delete Messages</b> - To remove links\n` +
+        `✅ <b>Restrict Members</b> - To mute violators\n` +
+        `✅ <b>Ban Users</b> - For serious violations\n` +
+        `✅ <b>Pin Messages</b> - For important notices\n` +
+        `✅ <b>Invite Users</b> - To manage group\n\n` +
+        `Please promote me with full permissions by clicking the button below:`,
+        {
+          inline_keyboard: [[
+            {
+              text: "🚀 PROMOTE TO ADMIN",
+              url: `https://t.me/${(await bot.getMe()).result.username}?startgroup=admin`
+            }
+          ]]
+        }
+      );
+
+      // Store callback data for later
+      DB.pendingPrompts.set(`${chatId}_${userId}`, {
+        messageId: promotionMessage.result.message_id,
+        timestamp: Date.now(),
+        chatTitle
+      });
+
+      // Auto-delete promotion message after 1 minute
+      setTimeout(async () => {
+        try {
+          await bot.deleteMessage(chatId, promotionMessage.result.message_id);
+          DB.pendingPrompts.delete(`${chatId}_${userId}`);
+        } catch (e) {
+          console.error("Failed to delete promotion message:", e);
+        }
+      }, 60000);
+
+      // Notify owner
+      await bot.sendMessage(
+        CONFIG.OWNER_ID,
+        `📢 <b>Admin Permission Requested</b>\n\n` +
+        `• Group: ${chatTitle}\n` +
+        `• Group ID: <code>${chatId}</code>\n` +
+        `• Requested by: <code>${userId}</code>\n` +
+        `• Time: ${new Date().toLocaleString()}`
+      );
+
+    } catch (error) {
+      console.error("Failed to request admin permissions:", error);
+    }
+  }
+
   // Clear cache for a specific group
   static clearCache(chatId) {
     delete this.groupAdmins[chatId];
   }
-
-  // Periodically refresh admin cache (optional)
-  static startAutoRefresh(intervalMinutes = 5) {
-    setInterval(() => {
-      console.log("Auto-refreshing admin caches...");
-      this.groupAdmins = {};
-    }, intervalMinutes * 60 * 1000);
-  }
 }
 
-// Start auto-refresh (uncomment if needed)
-// AdminManager.startAutoRefresh(5);
+// ================= INLINE KEYBOARDS =================
+class Keyboards {
+  static mainMenu() {
+    return {
+      inline_keyboard: [
+        [
+          { text: "🛡️ Protection Panel", callback_data: "panel" },
+          { text: "📊 Stats", callback_data: "stats" }
+        ],
+        [
+          { text: "👥 Groups", callback_data: "groups" },
+          { text: "📝 Mute Logs", callback_data: "mutes" }
+        ],
+        [
+          { text: "✅ Enable", callback_data: "enable" },
+          { text: "❌ Disable", callback_data: "disable" }
+        ],
+        [
+          { text: "➕ Add Admin to Group", callback_data: "add_admin" }
+        ]
+      ]
+    };
+  }
+
+  static adminPromotion(chatId, chatTitle) {
+    return {
+      inline_keyboard: [[
+        {
+          text: `🚀 Promote in ${chatTitle.substring(0, 15)}...`,
+          url: `https://t.me/${process.env.BOT_USERNAME || "your_bot"}?startgroup=admin&admin=`
+        }
+      ]]
+    };
+  }
+
+  static backButton() {
+    return {
+      inline_keyboard: [[{ text: "🔙 Back", callback_data: "back" }]]
+    };
+  }
+}
 
 // ================= MESSAGE HANDLERS =================
 class MessageHandlers {
   static async handleHelp(chatId) {
-    const helpText = `🤖 **BOT HELP MENU**
+    const helpText = `<b>🤖 LINK PROTECTION BOT</b>
 
-👥 **GROUP PROTECTION**
+<b>👥 GROUP PROTECTION</b>
 • Links & Mentions → Auto Delete (Non-Admins Only)
 • Offenders → 2 Minute Mute (Non-Admins Only)
 • Group Admins & Owner → Allowed to Post Links
 • /groupid → Admin Only Command
 
-👑 **OWNER COMMANDS** (Private Only)
-• /panel → Bot Status Dashboard
+<b>👑 OWNER COMMANDS</b> (Private Only)
+• /panel → Interactive Control Panel
 • /on /off → Toggle Protection
 • /stats → Protection Statistics
 • /mutes → Recent Mute Records
 • /groups → Protected Groups List
 
-⚙️ **REQUIREMENTS**
-• Bot must be Administrator
-• Set Privacy to OFF in BotFather
-• Grant Delete Messages permission
+<b>➕ ADD ADMIN FEATURE</b>
+Use the "Add Admin" button in panel to automatically request full admin permissions in any group.
 
-📝 **NOTE:** 
+<b>⚙️ REQUIRED PERMISSIONS</b>
+✅ Delete Messages
+✅ Restrict Members
+✅ Ban Users
+✅ Pin Messages
+✅ Invite Users
+
+<b>📝 NOTE:</b> 
 ✅ Group Admins & Owner can post links
 ❌ Regular members cannot post links
-🛡️ Bot respects group hierarchy`;
+🛡️ Bot automatically requests full permissions when added`;
 
     await bot.sendMessage(chatId, helpText);
   }
@@ -156,14 +278,15 @@ class MessageHandlers {
     const adminCount = AdminManager.groupAdmins[chatId]?.length || 0;
 
     const message = await bot.sendMessage(chatId,
-      `👥 **GROUP INFORMATION**
-• **Name:** ${chat.title}
-• **ID:** \`${chatId}\`
-• **Type:** ${chat.type}
-• **Admins:** ${adminCount} users
-• **Protection:** ${DB.enabled ? "Active" : "Inactive"}
+      `<b>👥 GROUP INFORMATION</b>
 
-⚠️ This message will auto-delete in 10 seconds.`
+<b>• Name:</b> ${chat.title}
+<b>• ID:</b> <code>${chatId}</code>
+<b>• Type:</b> ${chat.type}
+<b>• Admins:</b> ${adminCount} users
+<b>• Protection:</b> ${DB.enabled ? "Active 🟢" : "Inactive 🔴"}
+
+<i>⚠️ This message will auto-delete in 10 seconds.</i>`
     );
 
     // Auto-delete after delay
@@ -176,79 +299,192 @@ class MessageHandlers {
     }, CONFIG.DELETE_NOTICE_DELAY);
   }
 
-  static async handleOwnerPanel(chatId, userId, cmd) {
-    const panels = {
-      "/panel": `🧑‍💼 **OWNER CONTROL PANEL**
+  static async handleOwnerPanel(chatId, userId, isCallback = false, callbackQueryId = null) {
+    const panelText = `<b>🧑‍💼 OWNER CONTROL PANEL</b>
 
-• **Protection:** ${DB.enabled ? "🟢 ACTIVE" : "🔴 DISABLED"}
-• **Messages Deleted:** ${DB.stats.deletes}
-• **Users Muted:** ${DB.stats.mutes}
-• **Groups Protected:** ${Object.keys(DB.groups).length}
+<b>• Protection:</b> ${DB.enabled ? "🟢 ACTIVE" : "🔴 DISABLED"}
+<b>• Messages Deleted:</b> ${DB.stats.deletes}
+<b>• Users Muted:</b> ${DB.stats.mutes}
+<b>• Groups Protected:</b> ${Object.keys(DB.groups).length}
 
-📋 **Admin Protection:** ENABLED
+<b>📋 Admin Protection:</b> ENABLED
 ✅ Group admins can post links
 ✅ Bot owner can post links
 ❌ Regular members restricted
 
-Use /on or /off to toggle protection.`,
+<b>🔄 Auto Admin Request:</b> ENABLED
+Bot automatically requests full permissions when added to groups.`;
 
-      "/stats": `📊 **PROTECTION STATISTICS**
-
-• **Total Deletes:** ${DB.stats.deletes}
-• **Total Mutes:** ${DB.stats.mutes}
-• **Recent Mutes:** ${DB.muteLogs.length} (last 24h)
-• **Active Groups:** ${Object.keys(DB.groups).length}
-• **Cached Admins:** ${Object.keys(AdminManager.groupAdmins).length} groups`,
-
-      "/groups": `🛡️ **PROTECTED GROUPS**\n\n${
-        Object.entries(DB.groups)
-          .map(([id, name], index) => {
-            const adminCount = AdminManager.groupAdmins[id]?.length || "?";
-            return `${index + 1}. ${name} (\`${id}\`) - ${adminCount} admins`;
-          })
-          .join("\n") || "No groups added yet."
-      }`,
-
-      "/mutes": `📋 **RECENT MUTE RECORDS**\n\n${
-        DB.muteLogs
-          .slice(-10)
-          .reverse()
-          .map((m, i) =>
-            `**${i + 1}. ${m.user}**
-• Group: ${m.chat}
-• Muted: ${m.start}
-• Until: ${m.end}
-• User ID: ${m.userId}
-• Duration: 2 minutes`
-          ).join("\n\n") || "No mute records found."
-      }`
-    };
-
-    if (panels[cmd]) {
-      await bot.sendMessage(chatId, panels[cmd]);
+    if (isCallback && callbackQueryId) {
+      await bot.answerCallbackQuery(callbackQueryId);
+      await bot.sendMessage(chatId, panelText, Keyboards.mainMenu());
+    } else {
+      await bot.sendMessage(chatId, panelText, Keyboards.mainMenu());
     }
   }
 
   static async handleAdminAdded(chat, ownerId) {
-    DB.groups[chat.id] = chat.title || "Unnamed Group";
+    DB.groups[chat.id] = {
+      title: chat.title || "Unnamed Group",
+      admins: [],
+      addedDate: new Date().toISOString()
+    };
 
     // Refresh admin list for this new group
     await AdminManager.refreshGroupAdmins(chat.id);
 
-    const notification = `🟢 **BOT ADDED AS ADMINISTRATOR**
+    // Auto-request admin permissions
+    await AdminManager.requestAdminPermissions(
+      chat.id,
+      ownerId,
+      chat.title || "Unnamed Group"
+    );
 
-• **Group:** ${chat.title}
-• **ID:** \`${chat.id}\`
-• **Type:** ${chat.type}
-• **Admins:** ${AdminManager.groupAdmins[chat.id]?.length || 0} users
-• **Time:** ${new Date().toLocaleString()}
+    const notification = `<b>🟢 BOT ADDED TO GROUP</b>
 
-✅ **Admin Protection Active:**
+<b>• Group:</b> ${chat.title}
+<b>• ID:</b> <code>${chat.id}</code>
+<b>• Type:</b> ${chat.type}
+<b>• Admins:</b> ${AdminManager.groupAdmins[chat.id]?.length || 0} users
+<b>• Time:</b> ${new Date().toLocaleString()}
+
+✅ <b>Admin Protection Active:</b>
 • Group admins can post links
 • Regular members restricted
-• Bot protection is now active in this group.`;
+
+🚀 <b>Auto Admin Request Sent:</b>
+I've automatically requested full admin permissions in the group.`;
 
     await bot.sendMessage(ownerId, notification);
+  }
+
+  static async handleCallbackQuery(callbackQuery, chatId, userId) {
+    const { id: callbackId, data } = callbackQuery;
+    const message = callbackQuery.message;
+
+    try {
+      switch (data) {
+        case "panel":
+          await bot.answerCallbackQuery(callbackId);
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>🧑‍💼 OWNER CONTROL PANEL</b>\n\nUse the buttons below:`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.mainMenu()
+          });
+          break;
+
+        case "stats":
+          await bot.answerCallbackQuery(callbackId);
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>📊 PROTECTION STATISTICS</b>\n\n` +
+                  `<b>• Total Deletes:</b> ${DB.stats.deletes}\n` +
+                  `<b>• Total Mutes:</b> ${DB.stats.mutes}\n` +
+                  `<b>• Recent Mutes:</b> ${DB.muteLogs.length} (last 24h)\n` +
+                  `<b>• Active Groups:</b> ${Object.keys(DB.groups).length}\n` +
+                  `<b>• Cached Admins:</b> ${Object.keys(AdminManager.groupAdmins).length} groups`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.backButton()
+          });
+          break;
+
+        case "groups":
+          await bot.answerCallbackQuery(callbackId);
+          const groupsText = Object.entries(DB.groups)
+            .map(([id, group], index) => {
+              const adminCount = AdminManager.groupAdmins[id]?.length || "?";
+              return `${index + 1}. ${group.title} (<code>${id}</code>) - ${adminCount} admins`;
+            })
+            .join("\n") || "No groups added yet.";
+
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>🛡️ PROTECTED GROUPS</b>\n\n${groupsText}`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.backButton()
+          });
+          break;
+
+        case "mutes":
+          await bot.answerCallbackQuery(callbackId);
+          const mutesText = DB.muteLogs
+            .slice(-10)
+            .reverse()
+            .map((m, i) =>
+              `<b>${i + 1}. ${m.user}</b>\n` +
+              `• Group: ${m.chat}\n` +
+              `• Muted: ${m.start}\n` +
+              `• Until: ${m.end}\n` +
+              `• User ID: ${m.userId}`
+            ).join("\n\n") || "No mute records found.";
+
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>📋 RECENT MUTE RECORDS</b>\n\n${mutesText}`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.backButton()
+          });
+          break;
+
+        case "enable":
+          DB.enabled = true;
+          await bot.answerCallbackQuery(callbackId, "✅ Protection Enabled!");
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>✅ PROTECTION ENABLED</b>\n\nProtection is now active in all groups.`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.backButton()
+          });
+          break;
+
+        case "disable":
+          DB.enabled = false;
+          await bot.answerCallbackQuery(callbackId, "❌ Protection Disabled!");
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>❌ PROTECTION DISABLED</b>\n\nProtection is now inactive in all groups.`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.backButton()
+          });
+          break;
+
+        case "add_admin":
+          await bot.answerCallbackQuery(callbackId);
+          await bot.editMessageText({
+            chat_id: chatId,
+            message_id: message.message_id,
+            text: `<b>➕ ADD ADMIN TO GROUP</b>\n\n` +
+                  `To add me as admin in a group:\n\n` +
+                  `1. Add me to any group\n` +
+                  `2. I'll automatically request full admin permissions\n` +
+                  `3. Promote me with all permissions\n\n` +
+                  `Required permissions:\n` +
+                  `✅ Delete Messages\n` +
+                  `✅ Restrict Members\n` +
+                  `✅ Ban Users\n` +
+                  `✅ Pin Messages\n` +
+                  `✅ Invite Users`,
+            parse_mode: "HTML",
+            reply_markup: Keyboards.backButton()
+          });
+          break;
+
+        case "back":
+          await bot.answerCallbackQuery(callbackId);
+          await this.handleOwnerPanel(chatId, userId, true, callbackId);
+          break;
+      }
+    } catch (error) {
+      console.error("Callback handling error:", error);
+      await bot.answerCallbackQuery(callbackId, "❌ Error processing request");
+    }
   }
 }
 
@@ -307,6 +543,22 @@ export default async function handler(req, res) {
   try {
     const update = req.body;
 
+    // Handle callback queries (inline keyboard buttons)
+    if (update.callback_query) {
+      const { callback_query: callbackQuery } = update;
+      const { message, from } = callbackQuery;
+      const chatId = message.chat.id;
+      const userId = from.id;
+
+      // Only allow owner to use callback buttons
+      if (String(userId) === String(CONFIG.OWNER_ID)) {
+        await MessageHandlers.handleCallbackQuery(callbackQuery, chatId, userId);
+      } else {
+        await bot.answerCallbackQuery(callbackQuery.id, "❌ Unauthorized access!");
+      }
+      return res.status(200).end();
+    }
+
     // Handle bot being added as admin
     if (update.my_chat_member) {
       const { chat, new_chat_member } = update.my_chat_member;
@@ -342,18 +594,40 @@ export default async function handler(req, res) {
 
     // Owner commands (private chat only)
     if (isPrivateChat && String(userId) === String(CONFIG.OWNER_ID)) {
-      const ownerCommands = ["/panel", "/on", "/off", "/stats", "/groups", "/mutes"];
+      if (command === "/panel") {
+        await MessageHandlers.handleOwnerPanel(chatId, userId);
+        return res.status(200).end();
+      }
 
-      if (ownerCommands.includes(command.split(" ")[0])) {
-        if (command === "/on") {
-          DB.enabled = true;
-          await bot.sendMessage(chatId, "✅ **Protection has been ENABLED**\n\nGroup admins can post links\nRegular members restricted");
-        } else if (command === "/off") {
-          DB.enabled = false;
-          await bot.sendMessage(chatId, "❌ **Protection has been DISABLED**\n\nNo link restrictions for anyone");
-        } else {
-          await MessageHandlers.handleOwnerPanel(chatId, userId, command);
-        }
+      if (command === "/on") {
+        DB.enabled = true;
+        await bot.sendMessage(chatId, 
+          "<b>✅ PROTECTION ENABLED</b>\n\n" +
+          "Link protection is now active in all groups.\n" +
+          "Group admins can post links, regular members cannot.",
+          Keyboards.mainMenu()
+        );
+        return res.status(200).end();
+      }
+
+      if (command === "/off") {
+        DB.enabled = false;
+        await bot.sendMessage(chatId,
+          "<b>❌ PROTECTION DISABLED</b>\n\n" +
+          "Link protection is now inactive in all groups.\n" +
+          "Everyone can post links.",
+          Keyboards.mainMenu()
+        );
+        return res.status(200).end();
+      }
+
+      if (command === "/stats") {
+        const statsText = `<b>📊 PROTECTION STATISTICS</b>\n\n` +
+          `<b>• Total Deletes:</b> ${DB.stats.deletes}\n` +
+          `<b>• Total Mutes:</b> ${DB.stats.mutes}\n` +
+          `<b>• Recent Mutes:</b> ${DB.muteLogs.length} (last 24h)\n` +
+          `<b>• Active Groups:</b> ${Object.keys(DB.groups).length}`;
+        await bot.sendMessage(chatId, statsText);
         return res.status(200).end();
       }
     }
@@ -383,7 +657,6 @@ export default async function handler(req, res) {
     }
 
     // ================= CRITICAL: CHECK IF USER IS ADMIN =================
-    // This is the key change - admins can post links
     const isAdmin = await AdminManager.isGroupAdmin(chatId, userId);
     
     if (isAdmin) {
